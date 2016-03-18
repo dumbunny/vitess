@@ -13,8 +13,7 @@ class KeyRange(object):
   """Definition of KeyRange object.
 
   Vitess uses range based sharding. KeyRange denotes the range
-  for the sharding key. This class also provides bson encoding
-  for this object.
+  for the sharding key.
 
   Attributes:
     Start: start of the keyrange.
@@ -49,22 +48,3 @@ class KeyRange(object):
         self.End == keyrange_constants.MAX_KEY):
       return 'KeyRange(%r)' % keyrange_constants.NON_PARTIAL_KEYRANGE
     return 'KeyRange(%r-%r)' % (self.Start, self.End)
-
-  def bson_encode(self):
-    """Bson encode KeyRange.
-
-    Returns:
-      Dict of start and end values for the KeyRange.
-      {"Start": start, "End": end}
-    """
-
-    return {'Start': self.Start, 'End': self.End}
-
-  def bson_init(self, raw_values):
-    """Bson initialize the object with start and end dict.
-
-    Args:
-      raw_values: Dictionary of start and end values for keyrange.
-    """
-    self.Start = raw_values['Start']
-    self.End = raw_values['End']

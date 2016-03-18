@@ -1,20 +1,28 @@
 package com.youtube.vitess.client.cursor;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.primitives.UnsignedLong;
 import com.google.protobuf.ByteString;
 
+import com.youtube.vitess.mysql.DateTime;
 import com.youtube.vitess.proto.Query;
 import com.youtube.vitess.proto.Query.Field;
-
-import org.joda.time.DateTime;
-import org.joda.time.format.DateTimeFormat;
-import org.joda.time.format.ISODateTimeFormat;
+import com.youtube.vitess.proto.Query.Type;
 
 import java.math.BigDecimal;
+import java.sql.Date;
 import java.sql.SQLDataException;
 import java.sql.SQLException;
+import java.sql.Time;
+import java.sql.Timestamp;
+import java.text.ParseException;
 import java.util.ArrayList;
+import java.util.Calendar;
 import java.util.List;
+
+import javax.annotation.concurrent.NotThreadSafe;
 
 /**
  * Type-converting wrapper around raw
@@ -24,12 +32,26 @@ import java.util.List;
  * them by combining {@link com.youtube.vitess.proto.Query.Row} with
  * the list of {@link Field}s from the corresponding
  * {@link com.youtube.vitess.proto.Query.QueryResult}.
+ *
+ * <p>Note that {@code columnIndex} values start at 1 for the first column,
+ * since the methods on {@code Row} are intended to be compatible with those
+ * on {@link java.sql.ResultSet} (which uses 1-based {@code columnIndex})
+ * where possible.
  */
+@NotThreadSafe
 public class Row {
-  private FieldMap fieldMap;
-  private List<ByteString> values;
-  private Query.Row rawRow;
-  private boolean lastGetWasNull;
+  private final FieldMap fieldMap;
+  private final List<ByteString> values;
+  private final Query.Row rawRow;
+  /**
+   * Remembers whether the column referenced by the last {@code get*()} was
+   * MySQL {@code NULL}.
+   *
+   * <p>Although {@link Row} is not supposed to be used by multiple threads,
+   * we defensively declare {@code lastGetWasNull} as {@code volatile} since
+   * {@link Cursor} in general is used in asynchronous callbacks.
+   */
+  private volatile boolean lastGetWasNull;
 
   /**
    * Construct a Row from {@link com.youtube.vitess.proto.Query.Row}
@@ -65,11 +87,16 @@ public class Row {
    * so a Row created in this way can't be used with code that requires
    * access to the raw row proto.
    */
+  @VisibleForTesting
   public Row(List<Field> fields, List<ByteString> values) {
     this.fieldMap = new FieldMap(fields);
+    this.rawRow = null;
     this.values = values;
   }
 
+  /**
+   * Returns the number of columns.
+   */
   public int size() {
     return values.size();
   }
@@ -86,6 +113,9 @@ public class Row {
     return fieldMap;
   }
 
+  /**
+   * Returns 1-based column number.
+   */
   public int findColumn(String columnLabel) throws SQLException {
     Integer columnIndex = fieldMap.getIndex(columnLabel);
     if (columnIndex == null) {
@@ -98,11 +128,30 @@ public class Row {
     return getObject(findColumn(columnLabel));
   }
 
+  /**
+   * @param columnIndex 1-based column number (0 is invalid)
+   */
   public Object getObject(int columnIndex) throws SQLException {
-    if (columnIndex >= values.size()) {
+    ByteString rawValue = getRawValue(columnIndex);
+    if (rawValue == null) {
+      // Only a MySQL NULL value should return null.
+      // A zero-length value should return the appropriate type.
+      return null;
+    }
+    return convertFieldValue(fieldMap.get(columnIndex), rawValue);
+  }
+
+  /**
+   * Returns the raw {@link ByteString} for a column.
+   *
+   * @param columnIndex 1-based column number (0 is invalid)
+   */
+  protected ByteString getRawValue(int columnIndex) throws SQLException {
+    checkArgument(columnIndex >= 1, "columnIndex out of range: %s", columnIndex);
+    if (columnIndex > values.size()) {
       throw new SQLDataException("invalid columnIndex: " + columnIndex);
     }
-    Object value = convertFieldValue(fieldMap.get(columnIndex), values.get(columnIndex));
+    ByteString value = values.get(columnIndex - 1);
     lastGetWasNull = (value == null);
     return value;
   }
@@ -122,6 +171,8 @@ public class Row {
    *
    * <p>To distinguish between 0 and SQL NULL, use either {@link #wasNull()}
    * or {@link #getObject(int,Class)}.
+   *
+   * @param columnIndex 1-based column number (0 is invalid)
    */
   public int getInt(int columnIndex) throws SQLException {
     Integer value = getObject(columnIndex, Integer.class);
@@ -132,6 +183,9 @@ public class Row {
     return getULong(findColumn(columnLabel));
   }
 
+  /**
+   * @param columnIndex 1-based column number (0 is invalid)
+   */
   public UnsignedLong getULong(int columnIndex) throws SQLException {
     return getObject(columnIndex, UnsignedLong.class);
   }
@@ -140,6 +194,9 @@ public class Row {
     return getString(findColumn(columnLabel));
   }
 
+  /**
+   * @param columnIndex 1-based column number (0 is invalid)
+   */
   public String getString(int columnIndex) throws SQLException {
     return getObject(columnIndex, String.class);
   }
@@ -159,6 +216,8 @@ public class Row {
    *
    * <p>To distinguish between 0 and SQL NULL, use either {@link #wasNull()}
    * or {@link #getObject(int,Class)}.
+   *
+   * @param columnIndex 1-based column number (0 is invalid)
    */
   public long getLong(int columnIndex) throws SQLException {
     Long value = getObject(columnIndex, Long.class);
@@ -180,6 +239,8 @@ public class Row {
    *
    * <p>To distinguish between 0 and SQL NULL, use either {@link #wasNull()}
    * or {@link #getObject(int,Class)}.
+   *
+   * @param columnIndex 1-based column number (0 is invalid)
    */
   public double getDouble(int columnIndex) throws SQLException {
     Double value = getObject(columnIndex, Double.class);
@@ -201,24 +262,161 @@ public class Row {
    *
    * <p>To distinguish between 0 and SQL NULL, use either {@link #wasNull()}
    * or {@link #getObject(int,Class)}.
+   *
+   * @param columnIndex 1-based column number (0 is invalid)
    */
   public float getFloat(int columnIndex) throws SQLException {
     Float value = getObject(columnIndex, Float.class);
     return value == null ? 0 : value;
   }
 
-  public DateTime getDateTime(String columnLabel) throws SQLException {
-    return getDateTime(findColumn(columnLabel));
+  /**
+   * Returns the column value as a {@link Date} with the default time zone.
+   */
+  public Date getDate(String columnLabel) throws SQLException {
+    return getDate(findColumn(columnLabel), Calendar.getInstance());
   }
 
-  public DateTime getDateTime(int columnIndex) throws SQLException {
-    return getObject(columnIndex, DateTime.class);
+  /**
+   * Returns the column value as a {@link Date} with the given {@link Calendar}.
+   */
+  public Date getDate(String columnLabel, Calendar cal) throws SQLException {
+    return getDate(findColumn(columnLabel), cal);
+  }
+
+  /**
+   * Returns the column value as a {@link Date} with the default time zone.
+   *
+   * @param columnIndex 1-based column number (0 is invalid)
+   */
+  public Date getDate(int columnIndex) throws SQLException {
+    return getDate(columnIndex, Calendar.getInstance());
+  }
+
+  /**
+   * Returns the column value as a {@link Date} with the given {@link Calendar}.
+   *
+   * @param columnIndex 1-based column number (0 is invalid)
+   */
+  public Date getDate(int columnIndex, Calendar cal) throws SQLException {
+    ByteString rawValue = getRawValue(columnIndex);
+    if (rawValue == null) {
+      return null;
+    }
+    Field field = fieldMap.get(columnIndex);
+    if (field.getType() != Type.DATE) {
+      throw new SQLDataException(
+          "type mismatch, expected: " + Type.DATE + ", actual: " + field.getType());
+    }
+    try {
+      return DateTime.parseDate(rawValue.toStringUtf8(), cal);
+    } catch (ParseException e) {
+      throw new SQLDataException("Can't parse DATE: " + rawValue.toStringUtf8(), e);
+    }
+  }
+
+  /**
+   * Returns the column value as {@link Time} with the default time zone.
+   */
+  public Time getTime(String columnLabel) throws SQLException {
+    return getTime(findColumn(columnLabel), Calendar.getInstance());
+  }
+
+  /**
+   * Returns the column value as {@link Time} with the given {@link Calendar}.
+   */
+  public Time getTime(String columnLabel, Calendar cal) throws SQLException {
+    return getTime(findColumn(columnLabel), cal);
+  }
+
+  /**
+   * Returns the column value as {@link Time} with the default time zone.
+   *
+   * @param columnIndex 1-based column number (0 is invalid)
+   */
+  public Time getTime(int columnIndex) throws SQLException {
+    return getTime(columnIndex, Calendar.getInstance());
+  }
+
+  /**
+   * Returns the column value as {@link Time} with the given {@link Calendar}.
+   *
+   * @param columnIndex 1-based column number (0 is invalid)
+   */
+  public Time getTime(int columnIndex, Calendar cal) throws SQLException {
+    ByteString rawValue = getRawValue(columnIndex);
+    if (rawValue == null) {
+      return null;
+    }
+    Field field = fieldMap.get(columnIndex);
+    if (field.getType() != Type.TIME) {
+      throw new SQLDataException(
+          "type mismatch, expected: " + Type.TIME + ", actual: " + field.getType());
+    }
+    try {
+      return DateTime.parseTime(rawValue.toStringUtf8(), cal);
+    } catch (ParseException e) {
+      throw new SQLDataException("Can't parse TIME: " + rawValue.toStringUtf8(), e);
+    }
+  }
+
+  /**
+   * Returns the column value as {@link Timestamp} with the default time zone.
+   */
+  public Timestamp getTimestamp(String columnLabel) throws SQLException {
+    return getTimestamp(findColumn(columnLabel), Calendar.getInstance());
+  }
+
+  /**
+   * Returns the column value as {@link Timestamp} with the given {@link Calendar}.
+   */
+  public Timestamp getTimestamp(String columnLabel, Calendar cal) throws SQLException {
+    return getTimestamp(findColumn(columnLabel), cal);
+  }
+
+  /**
+   * Returns the column value as {@link Timestamp} with the default time zone.
+   *
+   * @param columnIndex 1-based column number (0 is invalid)
+   */
+  public Timestamp getTimestamp(int columnIndex) throws SQLException {
+    return getTimestamp(columnIndex, Calendar.getInstance());
+  }
+
+  /**
+   * Returns the column value as {@link Timestamp} with the given {@link Calendar}.
+   *
+   * @param columnIndex 1-based column number (0 is invalid)
+   */
+  public Timestamp getTimestamp(int columnIndex, Calendar cal) throws SQLException {
+    ByteString rawValue = getRawValue(columnIndex);
+    if (rawValue == null) {
+      return null;
+    }
+    Field field = fieldMap.get(columnIndex);
+    if (field.getType() != Type.TIMESTAMP && field.getType() != Type.DATETIME) {
+      throw new SQLDataException(
+          "type mismatch, expected: "
+              + Type.TIMESTAMP
+              + " or "
+              + Type.DATETIME
+              + ", actual: "
+              + field.getType());
+    }
+    try {
+      return DateTime.parseTimestamp(rawValue.toStringUtf8(), cal);
+    } catch (ParseException e) {
+      throw new SQLDataException("Can't parse TIMESTAMP: " + rawValue.toStringUtf8(), e);
+    }
   }
 
   public byte[] getBytes(String columnLabel) throws SQLException {
     return getBytes(findColumn(columnLabel));
   }
 
+  /**
+   * @param columnIndex 1-based column number (0 is invalid)
+   */
   public byte[] getBytes(int columnIndex) throws SQLException {
     return getObject(columnIndex, byte[].class);
   }
@@ -227,6 +425,9 @@ public class Row {
     return getBigDecimal(findColumn(columnLabel));
   }
 
+  /**
+   * @param columnIndex 1-based column number (0 is invalid)
+   */
   public BigDecimal getBigDecimal(int columnIndex) throws SQLException {
     return getObject(columnIndex, BigDecimal.class);
   }
@@ -246,6 +447,8 @@ public class Row {
    *
    * <p>To distinguish between 0 and SQL NULL, use either {@link #wasNull()}
    * or {@link #getObject(int,Class)}.
+   *
+   * @param columnIndex 1-based column number (0 is invalid)
    */
   public short getShort(int columnIndex) throws SQLException {
     Short value = getObject(columnIndex, Short.class);
@@ -265,6 +468,7 @@ public class Row {
    * }
    * </pre></blockquote>
    *
+   * @param columnIndex 1-based column number (0 is invalid)
    * @throws SQLDataException if the type doesn't match the actual value.
    */
   @SuppressWarnings("unchecked") // by runtime check
@@ -272,7 +476,7 @@ public class Row {
     Object o = getObject(columnIndex);
     if (o != null && !type.isInstance(o)) {
       throw new SQLDataException(
-          "type mismatch, expected:" + type.getName() + ", actual: " + o.getClass().getName());
+          "type mismatch, expected: " + type.getName() + ", actual: " + o.getClass().getName());
     }
     return (T) o;
   }
@@ -314,20 +518,14 @@ public class Row {
    * @throws SQLException
    */
   public boolean wasNull() throws SQLException {
-    // Note: lastGetWasNull is currently set only in getObject(int),
+    // Note: lastGetWasNull is currently set only in getRawValue(),
     // which means this relies on the fact that all other get*() methods
-    // eventually call into getObject(int). The unit tests help to ensure
-    // this by checking wasNull() after each get*().
+    // eventually call into that. The unit tests help to ensure this by
+    // checking wasNull() after each get*().
     return lastGetWasNull;
   }
 
   private static Object convertFieldValue(Field field, ByteString value) throws SQLException {
-    if (value == null) {
-      // Only a MySQL NULL value should return null.
-      // A zero-length value should return the appropriate type.
-      return null;
-    }
-
     // Note: We don't actually know the charset in which the value is encoded.
     // For dates and numeric values, we just assume UTF-8 because they (hopefully) don't contain
     // anything outside 7-bit ASCII, which (hopefully) is a subset of the actual charset.
@@ -355,18 +553,36 @@ public class Row {
       case NULL_TYPE:
         return null;
       case DATE:
-        return DateTime.parse(value.toStringUtf8(), ISODateTimeFormat.date());
+        // We don't get time zone information from the server,
+        // so we use the default time zone.
+        try {
+          return DateTime.parseDate(value.toStringUtf8());
+        } catch (ParseException e) {
+          throw new SQLDataException("Can't parse DATE: " + value.toStringUtf8(), e);
+        }
       case TIME:
-        return DateTime.parse(value.toStringUtf8(), DateTimeFormat.forPattern("HH:mm:ss"));
+        // We don't get time zone information from the server,
+        // so we use the default time zone.
+        try {
+          return DateTime.parseTime(value.toStringUtf8());
+        } catch (ParseException e) {
+          throw new SQLDataException("Can't parse TIME: " + value.toStringUtf8(), e);
+        }
       case DATETIME: // fall through
       case TIMESTAMP:
-        return DateTime.parse(value.toStringUtf8().replace(' ', 'T'));
+        // We don't get time zone information from the server,
+        // so we use the default time zone.
+        try {
+          return DateTime.parseTimestamp(value.toStringUtf8());
+        } catch (ParseException e) {
+          throw new SQLDataException("Can't parse TIMESTAMP: " + value.toStringUtf8(), e);
+        }
       case YEAR:
         return Short.valueOf(value.toStringUtf8());
       case ENUM: // fall through
-      case SET: // fall through
-      case BIT:
+      case SET:
         return value.toStringUtf8();
+      case BIT: // fall through
       case TEXT: // fall through
       case BLOB: // fall through
       case VARCHAR: // fall through

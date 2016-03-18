@@ -18,11 +18,13 @@ type SplitCloneTask struct {
 func (t *SplitCloneTask) Run(parameters map[string]string) ([]*automationpb.TaskContainer, string, error) {
 	// TODO(mberlin): Add parameters for the following options?
 	//                        '--source_reader_count', '1',
-	//                        '--destination_pack_count', '1',
 	//                        '--destination_writer_count', '1',
 	args := []string{"SplitClone"}
 	if excludeTables := parameters["exclude_tables"]; excludeTables != "" {
 		args = append(args, "--exclude_tables="+excludeTables)
+	}
+	if destinationPackCount := parameters["destination_pack_count"]; destinationPackCount != "" {
+		args = append(args, "--destination_pack_count="+destinationPackCount)
 	}
 	args = append(args, topoproto.KeyspaceShardString(parameters["keyspace"], parameters["source_shard"]))
 	output, err := ExecuteVtworker(context.TODO(), parameters["vtworker_endpoint"], args)
@@ -42,5 +44,5 @@ func (t *SplitCloneTask) RequiredParameters() []string {
 
 // OptionalParameters is part of the Task interface.
 func (t *SplitCloneTask) OptionalParameters() []string {
-	return []string{"exclude_tables"}
+	return []string{"exclude_tables", "destination_pack_count"}
 }

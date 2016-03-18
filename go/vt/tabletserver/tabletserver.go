@@ -251,7 +251,8 @@ func (tsv *TabletServer) StartService(target querypb.Target, dbconfigs dbconfigs
 	if err != nil {
 		return err
 	}
-	return tsv.SetServingType(tabletType, true, nil)
+	_ /* state changed */, err = tsv.SetServingType(tabletType, true, nil)
+	return err
 }
 
 // EnterLameduck causes tabletserver to enter the lameduck state. This
@@ -278,23 +279,24 @@ const (
 // stops internal services as deemed necessary. The tabletType determines the
 // primary serving type, while alsoAllow specifies other tablet types that
 // should also be honored for serving.
-func (tsv *TabletServer) SetServingType(tabletType topodatapb.TabletType, serving bool, alsoAllow []topodatapb.TabletType) error {
+// Returns true if the state of QueryService or the tablet type changed.
+func (tsv *TabletServer) SetServingType(tabletType topodatapb.TabletType, serving bool, alsoAllow []topodatapb.TabletType) (bool, error) {
 	defer tsv.ExitLameduck()
 
 	action, err := tsv.decideAction(tabletType, serving, alsoAllow)
 	if err != nil {
-		return err
+		return false /* state did not change */, err
 	}
 	switch action {
 	case actionNone:
-		return nil
+		return false /* state did not change */, nil
 	case actionFullStart:
-		return tsv.fullStart()
+		return true /* state changed */, tsv.fullStart()
 	case actionServeNewType:
-		return tsv.serveNewType()
+		return true /* state changed */, tsv.serveNewType()
 	case actionGracefulStop:
 		tsv.gracefulStop()
-		return nil
+		return true /* state changed */, nil
 	}
 	panic("unreachable")
 }
@@ -797,6 +799,8 @@ func (tsv *TabletServer) ExecuteBatch(ctx context.Context, target *querypb.Targe
 // subset of rows from the original query.
 func (tsv *TabletServer) SplitQuery(ctx context.Context, target *querypb.Target, sql string, bindVariables map[string]interface{}, splitColumn string, splitCount int64, sessionID int64) (splits []querytypes.QuerySplit, err error) {
 	logStats := newLogStats("SplitQuery", ctx)
+	logStats.OriginalSQL = sql
+	logStats.BindVariables = bindVariables
 	defer handleError(&err, logStats, tsv.qe.queryServiceStats)
 	if err = tsv.startRequest(target, sessionID, false, false); err != nil {
 		return nil, err
