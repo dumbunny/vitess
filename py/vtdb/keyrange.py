@@ -5,12 +5,11 @@
 """Contains the definition of the KeyRange object.
 """
 
-from bson import codec
 from vtdb import dbexceptions
 from vtdb import keyrange_constants
 
 
-class KeyRange(codec.BSONCoding):
+class KeyRange(object):
   """Definition of KeyRange object.
 
   Vitess uses range based sharding. KeyRange denotes the range
